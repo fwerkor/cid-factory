@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import signal
+import socket
 import subprocess
 import threading
 import time
@@ -12,6 +13,16 @@ from .command import build_command
 from .models import RunCreate, RunRecord, RunStatus
 from .repository import inspect_repository
 from .store import RunStore
+
+
+def _process_has_run_marker(pid: int, run_id: str) -> bool:
+    environ = Path(f"/proc/{pid}/environ")
+    try:
+        values = environ.read_bytes().split(b"\0")
+    except OSError:
+        return False
+    marker = f"CID_FACTORY_RUN_ID={run_id}".encode()
+    return marker in values
 
 
 class JobManager:
@@ -69,6 +80,7 @@ class JobManager:
             log_file = log_path.open("a", encoding="utf-8")
             env = os.environ.copy()
             env.update(record.command.environment)
+            env["CID_FACTORY_RUN_ID"] = record.id
             pythonpath = str(self.repo / "src")
             env["PYTHONPATH"] = (
                 pythonpath
@@ -89,6 +101,7 @@ class JobManager:
             record.finished_at = None
             record.exit_code = None
             record.pid = process.pid
+            record.execution_host = socket.gethostname()
             self._processes[run_id] = process
             self.store.put(record)
             threading.Thread(
@@ -124,6 +137,12 @@ class JobManager:
             record = self._require(run_id)
             if record.status is not RunStatus.RUNNING or record.pid is None:
                 return record
+            process = self._processes.get(run_id)
+            owned = process is not None or self._owns_persisted_process(record)
+            if not owned:
+                record.status = RunStatus.UNKNOWN
+                self.store.put(record)
+                return record
             record.status = RunStatus.STOPPING
             self.store.put(record)
             try:
@@ -140,9 +159,7 @@ class JobManager:
             process = self._processes.get(record.id)
             if process is not None:
                 return record
-            try:
-                os.kill(record.pid, 0)
-            except ProcessLookupError:
+            if not self._owns_persisted_process(record):
                 record.status = RunStatus.UNKNOWN
                 self.store.put(record)
         return record
@@ -152,6 +169,12 @@ class JobManager:
 
     def list(self) -> list[RunRecord]:
         return [self.refresh(record) for record in self.store.list()]
+
+    @staticmethod
+    def _owns_persisted_process(record: RunRecord) -> bool:
+        if record.pid is None or record.execution_host != socket.gethostname():
+            return False
+        return _process_has_run_marker(record.pid, record.id)
 
     def _require(self, run_id: str) -> RunRecord:
         record = self.store.get(run_id)

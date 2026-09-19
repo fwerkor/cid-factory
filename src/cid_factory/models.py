@@ -67,6 +67,7 @@ class RunRecord(BaseModel):
     finished_at: float | None = None
     pid: int | None = None
     exit_code: int | None = None
+    execution_host: str | None = None
     output_dir: str
     log_path: str
     repo_head: str | None = None
@@ -109,3 +110,50 @@ class RuntimeInfo(BaseModel):
     cuda_device_count: int | None = None
     npu_available: bool | None = None
     error: str | None = None
+
+
+class AssetKind(str, Enum):
+    DATASET = "dataset"
+    MANIFEST = "manifest"
+    CHECKPOINT = "checkpoint"
+    MODEL = "model"
+    OUTPUT = "output"
+
+
+class AssetRecord(BaseModel):
+    kind: AssetKind
+    name: str
+    path: str
+    root: str
+    modified_at: float | None = None
+    size_bytes: int | None = None
+    is_symlink: bool = False
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class AssetRoot(BaseModel):
+    path: str
+    label: str
+    available: bool
+
+
+class RunComparisonEntry(BaseModel):
+    id: str
+    name: str
+    stage: Stage
+    status: RunStatus
+    model: str
+    world_size: int
+    device: str
+    created_at: float
+    repo_head: str | None = None
+    parameters: dict[str, Primitive] = Field(default_factory=dict)
+    latest_step: int | None = None
+    latest_loss: float | None = None
+    latest_raw_loss: float | None = None
+    latest_learning_rate: float | None = None
+    elapsed_seconds: float | None = None
+    progress_fraction: float | None = None
+    validation_loss: float | None = None
+    best_validation_loss: float | None = None
+    metrics: list[dict[str, Any]] = Field(default_factory=list)

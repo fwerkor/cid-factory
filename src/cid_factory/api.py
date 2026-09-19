@@ -1,14 +1,25 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query
 
+from .assets import AssetCatalog, default_asset_roots
 from .command import build_command
+from .comparison import compare_run
 from .hardware import cuda_devices
 from .jobs import JobManager
 from .metrics import training_metrics, validation_metrics
-from .models import CommandPreview, RunCreate, RunRecord
+from .models import (
+    AssetKind,
+    AssetRecord,
+    AssetRoot,
+    CommandPreview,
+    RunComparisonEntry,
+    RunCreate,
+    RunRecord,
+)
 from .repository import inspect_repository
 from .runtime import inspect_runtime
 from .settings import Settings
@@ -24,6 +35,7 @@ jobs = JobManager(
     store,
     python_executable=settings.cid_python,
 )
+assets = AssetCatalog(default_asset_roots(settings.cid_repo))
 
 router = APIRouter(prefix="/api")
 
@@ -54,6 +66,26 @@ def hardware():
     return {"devices": cuda_devices()}
 
 
+@router.get("/assets/roots", response_model=list[AssetRoot])
+def asset_roots():
+    return assets.root_records()
+
+
+@router.get("/assets", response_model=list[AssetRecord])
+def list_assets(
+    kind: AssetKind | None = None,
+    query: str = "",
+    limit: int = Query(default=200, ge=1, le=1000),
+):
+    extra_roots = [Path(record.output_dir).expanduser() for record in jobs.list()]
+    return assets.search(
+        kind=kind,
+        query=query,
+        limit=limit,
+        extra_roots=extra_roots,
+    )
+
+
 @router.post("/runs/preview", response_model=CommandPreview)
 def preview_run(request: RunCreate):
     repo = inspect_repository(settings.cid_repo)
@@ -80,6 +112,25 @@ def create_run(request: RunCreate, launch: bool = Query(default=True)):
         return jobs.create(request, launch=launch)
     except OSError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/runs/compare", response_model=list[RunComparisonEntry])
+def compare_runs(
+    run_id: Annotated[list[str], Query()],
+    limit: Annotated[int, Query(ge=10, le=5000)] = 1000,
+):
+    unique_ids = list(dict.fromkeys(run_id))
+    if not 2 <= len(unique_ids) <= 4:
+        raise HTTPException(status_code=422, detail="compare requires 2 to 4 unique runs")
+
+    entries: list[RunComparisonEntry] = []
+    for item in unique_ids:
+        try:
+            record = jobs.get(item)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"run not found: {item}") from exc
+        entries.append(compare_run(record, limit=limit))
+    return entries
 
 
 @router.get("/runs/{run_id}", response_model=RunRecord)

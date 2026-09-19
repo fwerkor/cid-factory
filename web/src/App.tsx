@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Activity, AlertTriangle, ArrowLeft, Box, Check, ChevronDown, ChevronRight,
-  CircleStop, Clock3, Code2, Cpu, Database, Gauge, GitBranch, HardDrive,
-  Layers3, Moon, MoreHorizontal, Play, Plus, RefreshCw, Rocket, Search,
-  Settings, SlidersHorizontal, Sparkles, Sun, TerminalSquare, Workflow, Zap,
+  CircleStop, Clock3, Code2, Cpu, Database, FileJson, FolderOpen, Gauge,
+  GitBranch, GitCompareArrows, HardDrive, Layers3, Moon, MoreHorizontal,
+  Package, Play, Plus, RefreshCw, Rocket, Search, Settings, SlidersHorizontal,
+  Sparkles, Sun, TerminalSquare, Workflow, X, Zap,
 } from 'lucide-react'
 import './App.css'
 
 type Stage = 'stage0' | 'stage-a' | 'stage-b'
 type RunStatus = 'created' | 'running' | 'stopping' | 'completed' | 'failed' | 'stopped' | 'unknown'
 type Primitive = string | number | boolean | null
-type Page = 'overview' | 'new' | 'runs' | 'hardware' | 'settings'
+type Page = 'overview' | 'new' | 'runs' | 'assets' | 'hardware' | 'settings'
+type AssetKind = 'dataset' | 'manifest' | 'checkpoint' | 'model' | 'output'
 
 interface RunCreate {
   name: string
@@ -32,6 +34,7 @@ interface CommandPreview { argv: string[]; display: string; cwd: string; environ
 interface RunRecord {
   id: string; name: string; stage: Stage; status: RunStatus; created_at: number
   started_at?: number | null; finished_at?: number | null; pid?: number | null; exit_code?: number | null
+  execution_host?: string | null
   output_dir: string; log_path: string; repo_head?: string | null
   request: RunCreate; command: CommandPreview
 }
@@ -49,6 +52,21 @@ interface RuntimeInfo {
   torch_version?: string | null; transformers_version?: string | null
   cuda_available?: boolean | null; cuda_device_count?: number | null
   npu_available?: boolean | null; error?: string | null
+}
+interface AssetRecord {
+  kind: AssetKind; name: string; path: string; root: string
+  modified_at?: number | null; size_bytes?: number | null; is_symlink: boolean
+  details: Record<string, unknown>
+}
+interface AssetRoot { path: string; label: string; available: boolean }
+interface RunComparisonEntry {
+  id: string; name: string; stage: Stage; status: RunStatus; model: string
+  world_size: number; device: string; created_at: number; repo_head?: string | null
+  parameters: Record<string, Primitive>; latest_step?: number | null
+  latest_loss?: number | null; latest_raw_loss?: number | null
+  latest_learning_rate?: number | null; elapsed_seconds?: number | null
+  progress_fraction?: number | null; validation_loss?: number | null
+  best_validation_loss?: number | null; metrics: Record<string, unknown>[]
 }
 interface StageSurface {
   label: string; description: string; accent: string
@@ -90,6 +108,13 @@ function humanBytes(mb?: number | null) {
   if (mb == null) return '—'
   return mb >= 1024 ? (mb / 1024).toFixed(1) + ' GB' : Math.round(mb) + ' MB'
 }
+function humanFileBytes(bytes?: number | null) {
+  if (bytes == null) return '—'
+  if (bytes >= 1024 ** 3) return (bytes / 1024 ** 3).toFixed(1) + ' GB'
+  if (bytes >= 1024 ** 2) return (bytes / 1024 ** 2).toFixed(1) + ' MB'
+  if (bytes >= 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  return bytes + ' B'
+}
 function formatTime(unix?: number | null) {
   if (!unix) return '—'
   return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(unix * 1000))
@@ -114,6 +139,7 @@ function Sidebar({ page, setPage, onNewRun }: { page: Page; setPage: (page: Page
   const nav = [
     { id: 'overview' as Page, label: 'Overview', icon: Gauge },
     { id: 'runs' as Page, label: 'Runs', icon: Activity },
+    { id: 'assets' as Page, label: 'Assets', icon: FolderOpen },
     { id: 'hardware' as Page, label: 'Hardware', icon: Cpu },
   ]
   return <aside className="sidebar">
@@ -147,6 +173,7 @@ function MobileNav({ page, setPage, onNewRun }: { page: Page; setPage: (page: Pa
     <button className={page === 'overview' ? 'active' : ''} onClick={() => setPage('overview')}><Gauge size={18} /><span>Overview</span></button>
     <button className={page === 'runs' ? 'active' : ''} onClick={() => setPage('runs')}><Activity size={18} /><span>Runs</span></button>
     <button className="mobile-new" onClick={onNewRun}><Plus size={21} /><span>New</span></button>
+    <button className={page === 'assets' ? 'active' : ''} onClick={() => setPage('assets')}><FolderOpen size={18} /><span>Assets</span></button>
     <button className={page === 'hardware' ? 'active' : ''} onClick={() => setPage('hardware')}><Cpu size={18} /><span>Hardware</span></button>
     <button className={page === 'settings' ? 'active' : ''} onClick={() => setPage('settings')}><Settings size={18} /><span>Settings</span></button>
   </nav>
@@ -237,24 +264,156 @@ function Overview({ runs, devices, repository, surfaces, onNewRun, onRun }: {
   </div>
 }
 
-function RunsPage({ runs, onRun, onNewRun }: { runs: RunRecord[]; onRun: (run: RunRecord) => void; onNewRun: () => void }) {
+function RunsPage({ runs, onRun, onNewRun, onCompare }: {
+  runs: RunRecord[]
+  onRun: (run: RunRecord) => void
+  onNewRun: () => void
+  onCompare: (runIds: string[]) => void
+}) {
   const [query, setQuery] = useState('')
-  const filtered = runs.filter((run) => (run.name + ' ' + run.stage + ' ' + run.request.model + ' ' + run.status).toLowerCase().includes(query.toLowerCase()))
+  const [selected, setSelected] = useState<string[]>([])
+  const filtered = runs.filter((run) =>
+    (run.name + ' ' + run.stage + ' ' + run.request.model + ' ' + run.status)
+      .toLowerCase()
+      .includes(query.toLowerCase()),
+  )
+  function toggle(runId: string) {
+    setSelected((current) =>
+      current.includes(runId)
+        ? current.filter((item) => item !== runId)
+        : current.length < 4 ? [...current, runId] : current,
+    )
+  }
   return <div className="page"><section className="page-heading compact-heading"><div>
     <span className="overline">EXPERIMENTS</span><h1>Runs</h1><p>Every launch records the exact main-repository command and source commit.</p>
   </div><button className="primary-button" onClick={onNewRun}><Plus size={17} />New run</button></section>
     <section className="surface data-panel"><div className="table-toolbar">
       <div className="search-field"><Search size={16} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search runs" /></div>
-      <button className="ghost-button"><SlidersHorizontal size={15} />Filter</button>
+      <div className="table-actions">
+        {selected.length > 0 && <span className="selection-count">{selected.length}/4 selected</span>}
+        <button className="ghost-button" disabled={selected.length < 2} onClick={() => onCompare(selected)}>
+          <GitCompareArrows size={15} />Compare
+        </button>
+      </div>
     </div>
       {filtered.length ? <div className="runs-table-wrap"><table className="runs-table"><thead><tr>
-        <th>Run</th><th>Stage</th><th>Status</th><th>Model</th><th>Started</th><th>Commit</th><th />
-      </tr></thead><tbody>{filtered.map((run) => <tr key={run.id} onClick={() => onRun(run)}>
+        <th className="select-column" /><th>Run</th><th>Stage</th><th>Status</th><th>Model</th><th>Started</th><th>Commit</th><th />
+      </tr></thead><tbody>{filtered.map((run) => <tr key={run.id} className={selected.includes(run.id) ? 'selected-row' : ''} onClick={() => onRun(run)}>
+        <td className="select-column" onClick={(event) => event.stopPropagation()}>
+          <input type="checkbox" checked={selected.includes(run.id)} onChange={() => toggle(run.id)} aria-label={'Select ' + run.name} />
+        </td>
         <td><strong>{run.name}</strong><small className="mono">{run.id}</small></td>
         <td><span className="stage-table-pill" data-stage={run.stage}>{stageLabel(run.stage)}</span></td><td><StatusPill status={run.status} /></td>
         <td className="truncate-cell">{run.request.model}</td><td>{formatTime(run.started_at || run.created_at)}</td><td className="mono">{run.repo_head || '—'}</td><td><MoreHorizontal size={17} /></td>
       </tr>)}</tbody></table></div> :
         <EmptyState icon={<Database size={24} />} title={runs.length ? 'No matching runs' : 'No runs yet'} description={runs.length ? 'Try a different search.' : 'Your training history will appear here.'} />}
+    </section>
+  </div>
+}
+
+function assetIcon(kind: AssetKind) {
+  if (kind === 'dataset') return <Database size={17} />
+  if (kind === 'manifest') return <FileJson size={17} />
+  if (kind === 'checkpoint') return <Package size={17} />
+  if (kind === 'model') return <Box size={17} />
+  return <FolderOpen size={17} />
+}
+
+function assetDetail(asset: AssetRecord) {
+  const details = asset.details
+  if (asset.kind === 'dataset') {
+    const examples = details.examples
+    const transitions = details.transitions
+    if (examples != null || transitions != null) {
+      return [examples != null ? String(examples) + ' examples' : null, transitions != null ? String(transitions) + ' transitions' : null].filter(Boolean).join(' · ')
+    }
+    return 'JSONL dataset'
+  }
+  if (asset.kind === 'checkpoint') {
+    return details.stage ? String(details.stage) : 'checkpoint'
+  }
+  if (asset.kind === 'model') {
+    return details.model_type ? String(details.model_type) : 'local model'
+  }
+  if (asset.kind === 'manifest') {
+    return details.format ? String(details.format) : 'manifest'
+  }
+  return 'CID run output'
+}
+
+function AssetsPage() {
+  const [assets, setAssets] = useState<AssetRecord[]>([])
+  const [roots, setRoots] = useState<AssetRoot[]>([])
+  const [query, setQuery] = useState('')
+  const [kind, setKind] = useState<AssetKind | 'all'>('all')
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    const timer = window.setTimeout(async () => {
+      try {
+        const params = new URLSearchParams()
+        if (kind !== 'all') params.set('kind', kind)
+        if (query) params.set('query', query)
+        params.set('limit', '400')
+        const [assetData, rootData] = await Promise.all([
+          api<AssetRecord[]>('/api/assets?' + params.toString()),
+          api<AssetRoot[]>('/api/assets/roots'),
+        ])
+        if (!cancelled) {
+          setAssets(assetData)
+          setRoots(rootData)
+          setLoading(false)
+        }
+      } catch {
+        if (!cancelled) setLoading(false)
+      }
+    }, 180)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [kind, query])
+
+  const kinds: { id: AssetKind | 'all'; label: string }[] = [
+    { id: 'all', label: 'All' },
+    { id: 'dataset', label: 'Datasets' },
+    { id: 'manifest', label: 'Manifests' },
+    { id: 'checkpoint', label: 'Checkpoints' },
+    { id: 'model', label: 'Models' },
+    { id: 'output', label: 'Outputs' },
+  ]
+
+  return <div className="page">
+    <section className="page-heading compact-heading"><div>
+      <span className="overline">LOCAL CATALOG</span><h1>Assets</h1>
+      <p>Read-only discovery of data, checkpoints, models, and outputs visible to the Factory host.</p>
+    </div></section>
+
+    <div className="asset-root-strip">
+      {roots.map((root) => <div className={'asset-root-chip ' + (root.available ? '' : 'missing')} key={root.path}>
+        <FolderOpen size={13} /><span>{root.path}</span>
+      </div>)}
+    </div>
+
+    <section className="surface data-panel">
+      <div className="asset-toolbar">
+        <div className="search-field"><Search size={16} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search paths and asset names" /></div>
+        <div className="asset-kind-tabs">{kinds.map((item) =>
+          <button key={item.id} className={kind === item.id ? 'active' : ''} onClick={() => setKind(item.id)}>{item.label}</button>
+        )}</div>
+      </div>
+
+      {loading ? <div className="asset-loading"><RefreshCw className="spin" size={18} />Scanning configured roots…</div> :
+        assets.length ? <div className="asset-list">{assets.map((asset) =>
+          <div className="asset-row" key={asset.kind + ':' + asset.path}>
+            <div className="asset-type-icon" data-kind={asset.kind}>{assetIcon(asset.kind)}</div>
+            <div className="asset-main"><div className="asset-title"><strong>{asset.name}</strong><span>{asset.kind}</span>{asset.is_symlink && <span>alias</span>}</div>
+              <div className="mono asset-path">{asset.path}</div><small>{assetDetail(asset)}</small></div>
+            <div className="asset-meta"><strong>{humanFileBytes(asset.size_bytes)}</strong><span>{formatTime(asset.modified_at)}</span></div>
+          </div>
+        )}</div> :
+          <EmptyState icon={<FolderOpen size={25} />} title="No matching assets" description="Adjust the filter, or add roots with CID_FACTORY_ASSET_ROOTS." />}
     </section>
   </div>
 }
@@ -304,6 +463,78 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (value: boo
   return <button type="button" className={'toggle ' + (checked ? 'on' : '')} onClick={() => onChange(!checked)} aria-pressed={checked}><span /></button>
 }
 
+type PickerTarget = 'model' | 'data' | 'validation' | 'resume' | 'init'
+
+function AssetInput({ value, placeholder, onChange, onBrowse }: {
+  value: string
+  placeholder?: string
+  onChange: (value: string) => void
+  onBrowse: () => void
+}) {
+  return <div className="asset-input-control">
+    <input className="mono-input" placeholder={placeholder} value={value} onChange={(e) => onChange(e.target.value)} />
+    <button type="button" onClick={onBrowse}><FolderOpen size={14} />Browse</button>
+  </div>
+}
+
+function AssetPicker({ kind, checkpointStage, onSelect, onClose }: {
+  kind: AssetKind
+  checkpointStage?: Stage
+  onSelect: (asset: AssetRecord) => void
+  onClose: () => void
+}) {
+  const [assets, setAssets] = useState<AssetRecord[]>([])
+  const [query, setQuery] = useState('')
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    const timer = window.setTimeout(async () => {
+      try {
+        const params = new URLSearchParams({ kind, limit: '300' })
+        if (query) params.set('query', query)
+        const found = await api<AssetRecord[]>('/api/assets?' + params.toString())
+        if (!cancelled) {
+          setAssets(found)
+          setLoading(false)
+        }
+      } catch {
+        if (!cancelled) {
+          setAssets([])
+          setLoading(false)
+        }
+      }
+    }, 150)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [kind, query])
+
+  const visible = checkpointStage
+    ? assets.filter((asset) => asset.details.stage === checkpointStage)
+    : assets
+
+  return <div className="modal-backdrop" onMouseDown={onClose}>
+    <section className="asset-picker surface" onMouseDown={(event) => event.stopPropagation()}>
+      <div className="asset-picker-head"><div>
+        <span className="eyebrow">ASSET PICKER</span><h2>Select {kind}</h2>
+      </div><button className="icon-button" onClick={onClose}><X size={17} /></button></div>
+      <div className="search-field picker-search"><Search size={16} /><input autoFocus value={query} onChange={(e) => setQuery(e.target.value)} placeholder={'Search ' + kind + ' assets'} /></div>
+      <div className="asset-picker-list">
+        {loading ? <div className="asset-loading"><RefreshCw className="spin" size={17} />Scanning…</div> :
+          visible.length ? visible.map((asset) =>
+            <button className="asset-picker-row" key={asset.path} onClick={() => onSelect(asset)}>
+              <div className="asset-type-icon" data-kind={asset.kind}>{assetIcon(asset.kind)}</div>
+              <div><strong>{asset.name}</strong><span className="mono">{asset.path}</span><small>{assetDetail(asset)}</small></div>
+              <ChevronRight size={16} />
+            </button>
+          ) : <EmptyState icon={<FolderOpen size={24} />} title="No matching assets" description="Manual paths and Hugging Face model IDs remain available in the form." />}
+      </div>
+    </section>
+  </div>
+}
+
 function NewRunPage({ surfaces, devices, initialStage, onCreated }: {
   surfaces: StageSurfaces; devices: HardwareDevice[]; initialStage: Stage; onCreated: (run: RunRecord) => void
 }) {
@@ -321,6 +552,7 @@ function NewRunPage({ surfaces, devices, initialStage, onCreated }: {
   const [advanced, setAdvanced] = useState(false)
   const [launching, setLaunching] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [pickerTarget, setPickerTarget] = useState<PickerTarget | null>(null)
   const visibleDevices = useMemo(() => devices.slice(0, form.world_size).map((device) => device.index), [devices, form.world_size])
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -341,6 +573,22 @@ function NewRunPage({ surfaces, devices, initialStage, onCreated }: {
     catch (err) { setError(err instanceof Error ? err.message : 'Failed to launch run') }
     finally { setLaunching(false) }
   }
+  function selectAsset(asset: AssetRecord) {
+    if (pickerTarget === 'model') update('model', asset.path)
+    if (pickerTarget === 'data') update('data', asset.path)
+    if (pickerTarget === 'validation') update('validation_data', asset.path)
+    if (pickerTarget === 'resume') update('resume', asset.path)
+    if (pickerTarget === 'init') update('init_cid_checkpoint', asset.path)
+    setPickerTarget(null)
+  }
+  const pickerKind: AssetKind =
+    pickerTarget === 'model' ? 'model' :
+      pickerTarget === 'data' && form.stage === 'stage0' ? 'manifest' :
+        pickerTarget === 'data' || pickerTarget === 'validation' ? 'dataset' : 'checkpoint'
+  const pickerStage =
+    pickerTarget === 'init' ? 'stage-a' as Stage :
+      pickerTarget === 'resume' ? form.stage : undefined
+
   const commonKeys = form.stage === 'stage0' ? ['steps', 'learning_rate', 'micro_batch_size', 'target_global_batch_size', 'checkpoint_every'] :
     form.stage === 'stage-a' ? ['epochs', 'learning_rate', 'micro_batch_size', 'target_global_batch_size', 'checkpoint_every_steps'] :
       ['epochs', 'learning_rate', 'backbone_lr_scale', 'target_global_batch_size', 'checkpoint_every_steps']
@@ -358,14 +606,14 @@ function NewRunPage({ surfaces, devices, initialStage, onCreated }: {
       <section className="surface config-section"><div className="config-section-heading"><span className="step-badge">2</span><div><h2>Model & data</h2><p>Point Factory at the assets consumed by CID.</p></div></div>
         <div className="form-grid">
           <Field label="Run name"><input value={form.name} onChange={(e) => update('name', e.target.value)} /></Field>
-          <Field label="Base model"><input className="mono-input" value={form.model} onChange={(e) => update('model', e.target.value)} /></Field>
+          <Field label="Base model"><AssetInput value={form.model} onChange={(value) => update('model', value)} onBrowse={() => setPickerTarget('model')} /></Field>
           <Field label={form.stage === 'stage0' ? 'Data manifest' : 'Training data'} hint={form.stage === 'stage0' ? 'Prepared diffusion stream manifest' : 'Trajectory JSONL'}>
-            <input className="mono-input" placeholder={form.stage === 'stage0' ? '/data/manifest.json' : '/data/train.jsonl'} value={form.data} onChange={(e) => update('data', e.target.value)} />
+            <AssetInput placeholder={form.stage === 'stage0' ? '/data/manifest.json' : '/data/train.jsonl'} value={form.data} onChange={(value) => update('data', value)} onBrowse={() => setPickerTarget('data')} />
           </Field>
-          {form.stage !== 'stage0' && <Field label="Validation data" hint="Optional"><input className="mono-input" placeholder="/data/validation.jsonl" value={form.validation_data || ''} onChange={(e) => update('validation_data', e.target.value)} /></Field>}
+          {form.stage !== 'stage0' && <Field label="Validation data" hint="Optional"><AssetInput placeholder="/data/validation.jsonl" value={form.validation_data || ''} onChange={(value) => update('validation_data', value)} onBrowse={() => setPickerTarget('validation')} /></Field>}
           <Field label="Output directory"><input className="mono-input" value={form.output_dir} onChange={(e) => update('output_dir', e.target.value)} /></Field>
-          {form.stage === 'stage-b' && <Field label="Stage A checkpoint" hint="Required for a fresh Stage B"><input className="mono-input" placeholder="/runs/stage-a/stage-a-latest.pt" value={form.init_cid_checkpoint || ''} onChange={(e) => update('init_cid_checkpoint', e.target.value)} /></Field>}
-          <Field label="Resume checkpoint" hint="Optional"><input className="mono-input" placeholder="Leave empty for a fresh run" value={form.resume || ''} onChange={(e) => update('resume', e.target.value)} /></Field>
+          {form.stage === 'stage-b' && <Field label="Stage A checkpoint" hint="Required for a fresh Stage B"><AssetInput placeholder="/runs/stage-a/stage-a-latest.pt" value={form.init_cid_checkpoint || ''} onChange={(value) => update('init_cid_checkpoint', value)} onBrowse={() => setPickerTarget('init')} /></Field>}
+          <Field label="Resume checkpoint" hint="Optional"><AssetInput placeholder="Leave empty for a fresh run" value={form.resume || ''} onChange={(value) => update('resume', value)} onBrowse={() => setPickerTarget('resume')} /></Field>
         </div>
       </section>
       <section className="surface config-section"><div className="config-section-heading"><span className="step-badge">3</span><div><h2>Compute</h2><p>Choose the device and distributed world size.</p></div></div>
@@ -405,6 +653,7 @@ function NewRunPage({ surfaces, devices, initialStage, onCreated }: {
       <button className="launch-button" onClick={launch} disabled={launching}>{launching ? <RefreshCw className="spin" size={17} /> : <Play size={17} />}{launching ? 'Launching…' : 'Launch training'}</button>
       <p className="launch-note">Factory starts this command in the configured CID repository and reads metrics written by CID itself.</p>
     </div></aside></div>
+    {pickerTarget && <AssetPicker kind={pickerKind} checkpointStage={pickerStage} onSelect={selectAsset} onClose={() => setPickerTarget(null)} />}
   </div>
 }
 
@@ -449,6 +698,113 @@ function LossChart({ data }: { data: { step: number; loss: number }[] }) {
   </div>
 }
 
+function ComparisonChart({ runs }: { runs: RunComparisonEntry[] }) {
+  const width = 900
+  const height = 300
+  const padX = 52
+  const padY = 30
+  const series = runs.map((run) => run.metrics.map((item, index) => ({
+    step: Number(item.optimizer_steps ?? item.step ?? index),
+    loss: Number(item.mean_loss ?? item.loss ?? Number.NaN),
+  })).filter((item) => Number.isFinite(item.step) && Number.isFinite(item.loss)))
+  const all = series.flat()
+  if (all.length < 2) return <EmptyState icon={<Activity size={24} />} title="Not enough metrics" description="At least two metric points are needed for comparison." />
+
+  const minStep = Math.min(...all.map((item) => item.step))
+  const maxStep = Math.max(...all.map((item) => item.step))
+  const minLoss = Math.min(...all.map((item) => item.loss))
+  const maxLoss = Math.max(...all.map((item) => item.loss))
+  const lossSpan = Math.max(maxLoss - minLoss, Math.max(Math.abs(maxLoss), 1) * 0.04)
+  const low = minLoss - lossSpan * 0.12
+  const high = maxLoss + lossSpan * 0.12
+  const x = (step: number) => padX + (step - minStep) / Math.max(1, maxStep - minStep) * (width - padX * 2)
+  const y = (loss: number) => padY + (high - loss) / Math.max(1e-12, high - low) * (height - padY * 2)
+
+  return <div className="native-chart comparison-chart">
+    <svg viewBox={'0 0 ' + width + ' ' + height} role="img" aria-label="Run loss comparison">
+      {[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
+        const gy = padY + ratio * (height - padY * 2)
+        const label = high - ratio * (high - low)
+        return <g key={ratio}>
+          <line x1={padX} x2={width - padX} y1={gy} y2={gy} className="chart-grid-line" />
+          <text x={padX - 10} y={gy + 3} textAnchor="end" className="chart-axis-label">{label.toFixed(3)}</text>
+        </g>
+      })}
+      {series.map((items, index) =>
+        <polyline
+          key={runs[index].id}
+          points={items.map((item) => x(item.step).toFixed(1) + ',' + y(item.loss).toFixed(1)).join(' ')}
+          className={'comparison-line series-' + index}
+        />
+      )}
+      <text x={padX} y={height - 6} textAnchor="start" className="chart-axis-label">{minStep}</text>
+      <text x={width - padX} y={height - 6} textAnchor="end" className="chart-axis-label">{maxStep}</text>
+    </svg>
+  </div>
+}
+
+function ComparePage({ runIds, onBack }: { runIds: string[]; onBack: () => void }) {
+  const [entries, setEntries] = useState<RunComparisonEntry[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    const params = new URLSearchParams()
+    runIds.forEach((runId) => params.append('run_id', runId))
+    api<RunComparisonEntry[]>('/api/runs/compare?' + params.toString())
+      .then((data) => { setEntries(data); setError(null); setLoading(false) })
+      .catch((err) => { setError(err instanceof Error ? err.message : 'Comparison failed'); setLoading(false) })
+  }, [runIds])
+
+  const configRows = [
+    ['Stage', (entry: RunComparisonEntry) => stageLabel(entry.stage)],
+    ['Model', (entry: RunComparisonEntry) => entry.model],
+    ['Device', (entry: RunComparisonEntry) => entry.world_size + ' × ' + entry.device.toUpperCase()],
+    ['Learning rate', (entry: RunComparisonEntry) => String(entry.parameters.learning_rate ?? '—')],
+    ['Global batch', (entry: RunComparisonEntry) => String(entry.parameters.target_global_batch_size ?? '—')],
+    ['CID commit', (entry: RunComparisonEntry) => entry.repo_head || '—'],
+  ] as const
+
+  return <div className="page">
+    <button className="back-button" onClick={onBack}><ArrowLeft size={16} />Back to runs</button>
+    <section className="page-heading compact-heading"><div>
+      <span className="overline">EXPERIMENT ANALYSIS</span><h1>Compare runs</h1>
+      <p>Native CID metrics and the exact recorded launch configuration, aligned side by side.</p>
+    </div></section>
+
+    {loading ? <section className="surface panel"><div className="asset-loading"><RefreshCw className="spin" size={18} />Loading run metrics…</div></section> :
+      error ? <section className="surface panel"><div className="error-box">{error}</div></section> :
+        <>
+          <div className="comparison-card-grid">{entries.map((entry, index) =>
+            <article className="surface comparison-card" key={entry.id}>
+              <div className="comparison-card-head"><span className={'series-dot series-' + index} /><div><strong>{entry.name}</strong><small>{stageLabel(entry.stage)} · {entry.world_size} × {entry.device.toUpperCase()}</small></div><StatusPill status={entry.status} /></div>
+              <div className="comparison-metrics">
+                <div><span>Latest loss</span><strong>{entry.latest_loss != null ? entry.latest_loss.toFixed(4) : '—'}</strong></div>
+                <div><span>Step</span><strong>{entry.latest_step?.toLocaleString() || '—'}</strong></div>
+                <div><span>Validation</span><strong>{entry.validation_loss != null ? entry.validation_loss.toFixed(4) : '—'}</strong></div>
+                <div><span>Progress</span><strong>{entry.progress_fraction != null ? Math.round(entry.progress_fraction * 100) + '%' : '—'}</strong></div>
+              </div>
+            </article>
+          )}</div>
+
+          <section className="surface chart-panel comparison-panel">
+            <div className="section-heading"><div><span className="eyebrow">TRAINING</span><h2>Loss by optimizer step</h2></div><span className="metric-source">Native CID metrics</span></div>
+            <div className="chart-wrap comparison-chart-wrap"><ComparisonChart runs={entries} /></div>
+            <div className="comparison-legend">{entries.map((entry, index) =>
+              <span key={entry.id}><i className={'series-dot series-' + index} />{entry.name}</span>
+            )}</div>
+          </section>
+
+          <section className="surface data-panel comparison-table-panel">
+            <div className="section-heading"><div><span className="eyebrow">CONFIGURATION</span><h2>Recorded launch settings</h2></div></div>
+            <div className="runs-table-wrap"><table className="comparison-table"><thead><tr><th>Setting</th>{entries.map((entry) => <th key={entry.id}>{entry.name}</th>)}</tr></thead>
+              <tbody>{configRows.map(([label, value]) => <tr key={label}><td>{label}</td>{entries.map((entry) => <td key={entry.id} className={label === 'CID commit' ? 'mono' : ''}>{value(entry)}</td>)}</tr>)}</tbody>
+            </table></div>
+          </section>
+        </>}
+  </div>
+}
+
 function RunDetail({ run, onBack, onStop }: { run: RunRecord; onBack: () => void; onStop: (run: RunRecord) => void }) {
   const [metrics, setMetrics] = useState<Record<string, unknown>[]>([])
   const [validation, setValidation] = useState<Record<string, unknown>[]>([])
@@ -489,7 +845,7 @@ function RunDetail({ run, onBack, onStop }: { run: RunRecord; onBack: () => void
           <p className="muted-copy">No validation metrics have been written yet.</p>}</section></div>}
     {tab === 'logs' && <section className="surface terminal-panel"><div className="terminal-head"><span><TerminalSquare size={15} />{run.log_path}</span><span>{logs.length} lines</span></div><pre>{logs.length ? logs.join('\n') : 'Waiting for process output…'}</pre></section>}
     {tab === 'command' && <section className="surface command-detail"><div className="command-detail-grid"><div><span>CID repository</span><strong className="mono">{run.command.cwd}</strong></div>
-      <div><span>Source commit</span><strong className="mono">{run.repo_head || '—'}</strong></div><div><span>Output directory</span><strong className="mono">{run.output_dir}</strong></div><div><span>PID</span><strong className="mono">{run.pid || '—'}</strong></div></div>
+      <div><span>Source commit</span><strong className="mono">{run.repo_head || '—'}</strong></div><div><span>Output directory</span><strong className="mono">{run.output_dir}</strong></div><div><span>PID</span><strong className="mono">{run.pid || '—'}</strong></div><div><span>Execution host</span><strong className="mono">{run.execution_host || '—'}</strong></div></div>
       <div className="code-block"><div><Code2 size={15} />Exact command</div><pre>{run.command.display}</pre></div></section>}
   </div>
 }
@@ -514,7 +870,7 @@ function SettingsPage({ repository, runtime }: { repository: RepositoryInfo | nu
       {!runtime?.available && runtime?.error && <div className="warning-box"><AlertTriangle size={16} /><span>{runtime.error}</span></div>}
     </section>
     <section className="surface settings-section"><div className="settings-heading"><div className="settings-icon"><Settings size={18} /></div><div><h2>Environment overrides</h2><p>Configure Factory without editing its source.</p></div></div>
-      <div className="env-list"><div><code>CID_FACTORY_CID_REPO</code><span>Path to the main CID checkout</span></div><div><code>CID_FACTORY_CID_PYTHON</code><span>Python environment used to execute CID training</span></div><div><code>CID_FACTORY_STATE_DIR</code><span>Factory run metadata and process logs</span></div></div>
+      <div className="env-list"><div><code>CID_FACTORY_CID_REPO</code><span>Path to the main CID checkout</span></div><div><code>CID_FACTORY_CID_PYTHON</code><span>Python environment used to execute CID training</span></div><div><code>CID_FACTORY_ASSET_ROOTS</code><span>Path-separated roots scanned by the read-only asset catalog</span></div><div><code>CID_FACTORY_STATE_DIR</code><span>Factory run metadata and process logs</span></div></div>
     </section>
   </div>
 }
@@ -528,6 +884,7 @@ function App() {
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null)
   const [surfaces, setSurfaces] = useState<StageSurfaces>(fallbackSurfaces)
   const [selectedRun, setSelectedRun] = useState<RunRecord | null>(null)
+  const [comparisonRunIds, setComparisonRunIds] = useState<string[]>([])
   const [newRunStage, setNewRunStage] = useState<Stage>('stage-a')
   const [connected, setConnected] = useState(true)
 
@@ -556,8 +913,8 @@ function App() {
     }
     window.addEventListener('keydown', keydown); return () => window.removeEventListener('keydown', keydown)
   }, [])
-  function openNewRun(stage: Stage = 'stage-a') { setSelectedRun(null); setNewRunStage(stage); setPage('new') }
-  function changePage(next: Page) { setSelectedRun(null); setPage(next) }
+  function openNewRun(stage: Stage = 'stage-a') { setSelectedRun(null); setComparisonRunIds([]); setNewRunStage(stage); setPage('new') }
+  function changePage(next: Page) { setSelectedRun(null); setComparisonRunIds([]); setPage(next) }
   async function stopRun(run: RunRecord) {
     try { setSelectedRun(await api<RunRecord>('/api/runs/' + run.id + '/stop', { method: 'POST' })); load() } catch { /* preserve state */ }
   }
@@ -566,10 +923,12 @@ function App() {
     <div className="main-column"><Topbar theme={theme} toggleTheme={() => setTheme((value) => value === 'dark' ? 'light' : 'dark')} repository={repository} refresh={load} />
       {!connected && <div className="connection-banner"><AlertTriangle size={15} />Factory API is unavailable. The interface will reconnect automatically.</div>}
       <main>{selectedRun ? <RunDetail run={selectedRun} onBack={() => setSelectedRun(null)} onStop={stopRun} /> :
-        page === 'overview' ? <Overview runs={runs} devices={devices} repository={repository} surfaces={surfaces} onNewRun={openNewRun} onRun={setSelectedRun} /> :
-          page === 'new' ? <NewRunPage key={newRunStage} surfaces={surfaces} devices={devices} initialStage={newRunStage} onCreated={(run) => { setSelectedRun(run); load() }} /> :
-            page === 'runs' ? <RunsPage runs={runs} onRun={setSelectedRun} onNewRun={() => openNewRun()} /> :
-              page === 'hardware' ? <HardwarePage devices={devices} /> : <SettingsPage repository={repository} runtime={runtime} />}</main>
+        comparisonRunIds.length ? <ComparePage runIds={comparisonRunIds} onBack={() => setComparisonRunIds([])} /> :
+          page === 'overview' ? <Overview runs={runs} devices={devices} repository={repository} surfaces={surfaces} onNewRun={openNewRun} onRun={(run) => { setComparisonRunIds([]); setSelectedRun(run) }} /> :
+            page === 'new' ? <NewRunPage key={newRunStage} surfaces={surfaces} devices={devices} initialStage={newRunStage} onCreated={(run) => { setSelectedRun(run); load() }} /> :
+              page === 'runs' ? <RunsPage runs={runs} onRun={(run) => { setComparisonRunIds([]); setSelectedRun(run) }} onNewRun={() => openNewRun()} onCompare={setComparisonRunIds} /> :
+                page === 'assets' ? <AssetsPage /> :
+                  page === 'hardware' ? <HardwarePage devices={devices} /> : <SettingsPage repository={repository} runtime={runtime} />}</main>
     </div>
   </div>
 }

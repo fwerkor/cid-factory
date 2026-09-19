@@ -11,8 +11,11 @@ It is intentionally a **frontend and control plane**, not a second training impl
 - exact command preview before launch;
 - CUDA device selection and live GPU telemetry;
 - persistent run history with the CID Git commit used for each launch;
+- read-only asset catalog for local datasets, manifests, checkpoints, models, and run outputs;
+- asset pickers in the launcher while preserving manual paths and Hugging Face model IDs;
+- side-by-side comparison of 2–4 runs using native CID metrics and recorded launch settings;
 - native CID training/validation metric visualization;
-- process logs, command inspection, and stop control;
+- process logs, command inspection, and stop control with persisted PID ownership verification;
 - thin Python/FastAPI control plane;
 - no duplicated CID model or training implementation.
 
@@ -29,6 +32,8 @@ It is intentionally a **frontend and control plane**, not a second training impl
       +---- launch / observe processes
       +---- read native train_metrics*.jsonl
       +---- read validation_metrics.jsonl
+      +---- discover local assets (read only)
+      +---- compare recorded runs
       +---- query accelerator telemetry
       |
       v
@@ -38,7 +43,9 @@ It is intentionally a **frontend and control plane**, not a second training impl
       +---- cid train                         (Stage A)
       +---- cid train-full                    (Stage B)
 
-Factory records the resolved command and current CID source commit for every run. If CID rejects an invalid configuration, that validation remains authoritative.
+Factory records the resolved command and current CID source commit for every run. If CID rejects an invalid configuration, that validation remains authoritative. Factory never loads checkpoint tensors just to populate the UI; asset discovery reads filenames and small JSON metadata only.
+
+After a Factory restart, a persisted PID is considered controllable only when it belongs to the same host and still carries that run's `CID_FACTORY_RUN_ID` marker. This prevents a recycled OS PID from being signalled accidentally.
 
 ## Development
 
@@ -56,6 +63,10 @@ Factory itself stays lightweight. It separately discovers a Python environment w
 the actual CID process. Pin that environment explicitly when needed:
 
     export CID_FACTORY_CID_PYTHON=/path/to/cid-env/bin/python
+
+The Assets workspace scans a small default set of CID-adjacent directories. Provide additional or replacement roots as an OS path-separated list:
+
+    export CID_FACTORY_ASSET_ROOTS=/data/cid:/models/cid:/scratch/cid-runs
 
 Install the control plane:
 
