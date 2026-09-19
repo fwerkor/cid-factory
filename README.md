@@ -49,6 +49,11 @@ After a Factory restart, a persisted PID is considered controllable only when it
 
 ## Development
 
+For the packaged application:
+
+    python -m pip install cid-factory
+    cid-factory --host 0.0.0.0 --port 7860
+
 Requirements:
 
 - Python 3.10+

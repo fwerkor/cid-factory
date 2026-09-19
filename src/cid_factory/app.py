@@ -20,7 +20,9 @@ def create_app() -> FastAPI:
     )
     app.include_router(router)
 
-    web_dist = Path(__file__).resolve().parents[2] / "web" / "dist"
+    packaged_web = Path(__file__).resolve().with_name("web")
+    source_web = Path(__file__).resolve().parents[2] / "web" / "dist"
+    web_dist = packaged_web if packaged_web.exists() else source_web
     if web_dist.exists():
         assets = web_dist / "assets"
         if assets.exists():

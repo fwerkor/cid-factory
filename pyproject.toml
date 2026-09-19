@@ -9,6 +9,7 @@ description = "A polished WebUI and thin launcher for Continuous Interaction Dif
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
+authors = [{name = "Yuhang Cao"}]
 dependencies = [
   "fastapi>=0.115",
   "pydantic>=2.9",
@@ -25,8 +26,18 @@ dev = [
 [project.scripts]
 cid-factory = "cid_factory.cli:main"
 
+[project.urls]
+Repository = "https://github.com/fwerkor/cid-factory"
+CID = "https://github.com/fwerkor/continuous-interaction-diffusion"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/cid_factory"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"web/dist" = "cid_factory/web"
+
+[tool.hatch.build.targets.sdist.force-include]
+"web/dist" = "web/dist"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
