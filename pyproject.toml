@@ -33,12 +33,6 @@ CID = "https://github.com/fwerkor/continuous-interaction-diffusion"
 [tool.hatch.build.targets.wheel]
 packages = ["src/cid_factory"]
 
-[tool.hatch.build.targets.wheel.force-include]
-"web/dist" = "cid_factory/web"
-
-[tool.hatch.build.targets.sdist.force-include]
-"web/dist" = "web/dist"
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
