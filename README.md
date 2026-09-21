@@ -2,6 +2,8 @@
 
 CID Factory is the training console for Continuous Interaction Diffusion.
 
+Paper: [Continuous Interaction Diffusion](https://arxiv.org/abs/2608.10438)
+
 It is intentionally a **frontend and control plane**, not a second training implementation. Model code, dataset semantics, optimizer behavior, Stage 0/A/B training, evaluation, and checkpoint formats remain owned by the main CID repository. Factory turns those existing entry points into a coherent WebUI, launches the exact main-repository commands, and visualizes the metrics that CID already writes.
 
 ## What is included
@@ -115,5 +117,20 @@ Override it with CID_FACTORY_STATE_DIR or --state-dir. Training outputs remain w
 ## Design principle
 
 If a behavior can affect model semantics, it belongs in the main CID repository. Factory may expose, validate, preview, launch, stop, and visualize that behavior, but it should not silently reimplement it.
+
+## Citation
+
+CID Factory is supporting infrastructure for the CID ecosystem. If you use it in research, please cite the CID paper:
+
+```bibtex
+@article{cao2026continuous,
+  title   = {Continuous Interaction Diffusion: A Diffusion-Native Architecture for Asynchronous Tool-Augmented Reasoning},
+  author  = {Cao, Yuhang},
+  journal = {arXiv preprint arXiv:2608.10438},
+  year    = {2026},
+  doi     = {10.48550/arXiv.2608.10438},
+  url     = {https://arxiv.org/abs/2608.10438}
+}
+```
 
 Apache-2.0.
