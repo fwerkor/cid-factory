@@ -125,7 +125,7 @@ CID Factory is supporting infrastructure for the CID ecosystem. If you use it in
 ```bibtex
 @article{cao2026continuous,
   title   = {Continuous Interaction Diffusion: A Diffusion-Native Architecture for Asynchronous Tool-Augmented Reasoning},
-  author  = {Cao, Yuhang},
+  author  = {Cao, Yuhang and Mu, Yanzhou and Fang, Chunrong and Chen, Zhenyu},
   journal = {arXiv preprint arXiv:2608.10438},
   year    = {2026},
   doi     = {10.48550/arXiv.2608.10438},
